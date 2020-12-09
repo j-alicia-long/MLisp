@@ -37,6 +37,7 @@ module Type = struct
     | String of string
     | Int of Int64.t (* Python integers have arbitrary precision
                       * but this is the closest we can get in OCaml *)
+    | Float of float
     | Bool of bool
     | List of t list
     | Fun of (t list -> t)
@@ -46,6 +47,7 @@ module Type = struct
     | Symbol s -> "'" ^ s (* Lisp symbols are often represented as 'symbol *)
     | String s -> s
     | Int n -> Int64.to_string n
+    | Float f -> Float.to_string f
     | Bool b -> string_of_bool b
     | List lst -> "[" ^ String.concat ", " (List.map to_string lst) ^ "]"
     | Fun _ -> "<fun>"
@@ -55,6 +57,7 @@ module Type = struct
     | Symbol s -> s
     | String s -> s
     | Int n -> Int64.to_string n
+    | Float f -> Float.to_string f
     | Bool b -> Bool.to_string b
     | List lst -> "(" ^ String.concat " " (List.map to_lispy lst) ^ ")"
     | Fun _ ->
@@ -76,6 +79,7 @@ module Type = struct
     | Symbol a, Symbol b -> String.equal a b
     | String a, String b -> String.equal a b
     | Int a, Int b -> Int64.equal a b
+    | Float a, Float b -> Float.equal a b
     | Bool a, Bool b -> Bool.equal a b
     | List a, List b -> list_equal a b
     | _ -> false
@@ -121,8 +125,8 @@ module Env = struct
       let () =
         Hashtbl.iter
           (fun key v ->
-            print_indent ();
-            Format.fprintf ppf "%s: %s\n" key (Type.to_string v))
+             print_indent ();
+             Format.fprintf ppf "%s: %s\n" key (Type.to_string v))
           env.self
       in
       let () =
@@ -160,28 +164,41 @@ let rec eval env = function
       let () = Env.put s (eval env exp) env in
       Nil
   | Type.List [ Type.Symbol "set!"; Symbol s; exp ] ->
-      let () = Env.put s (eval env exp) env in
-      Nil
+      (
+        match Env.find s env with
+        | None -> Nil
+        | Some var -> let () = Env.put s (eval env exp) var in Nil
+      )
+  | Type.List [Type.Symbol "and"; exp1; exp2] ->
+      (* "And" short-circuits if first expression is false *)
+      if Type.is_truthy (eval env exp1) = false then Type.Bool false
+      else if Type.is_truthy (eval env exp2) = false then Type.Bool false
+      else Type.Bool true
+  | Type.List [Type.Symbol "or"; exp1; exp2] ->
+      (* "Or" short-circuits if first expression is true *)
+      if Type.is_truthy (eval env exp1) = true then Type.Bool true
+      else if Type.is_truthy (eval env exp2) = true then Type.Bool true
+      else Type.Bool false
   | Type.List [ Type.Symbol "lambda"; Type.List params; body ] ->
       Type.Fun
         (fun args ->
-          let evaled_params =
-            List.map
-              (fun param ->
-                match param with
-                | Type.Symbol s -> s
-                | _ -> raise (Runtime_error "Lambda parameter must be a symbol"))
-              params
-          in
-          let rec zip l1 l2 =
-            match (l1, l2) with
-            | [], [] -> []
-            | _ :: _, [] | [], _ :: _ ->
-                raise (Runtime_error "Lambda arguments do not match parameters")
-            | x1 :: x1s, x2 :: x2s -> (x1, x2) :: zip x1s x2s
-          in
-          let sub_env = Env.init (Some env) (zip evaled_params args) in
-          eval sub_env body)
+           let evaled_params =
+             List.map
+               (fun param ->
+                  match param with
+                  | Type.Symbol s -> s
+                  | _ -> raise (Runtime_error "Lambda parameter must be a symbol"))
+               params
+           in
+           let rec zip l1 l2 =
+             match (l1, l2) with
+             | [], [] -> []
+             | _ :: _, [] | [], _ :: _ ->
+                 raise (Runtime_error "Lambda arguments do not match parameters")
+             | x1 :: x1s, x2 :: x2s -> (x1, x2) :: zip x1s x2s
+           in
+           let sub_env = Env.init (Some env) (zip evaled_params args) in
+           eval sub_env body)
   | Type.List (op :: args) -> (
       let proc = eval env op in
       match proc with
@@ -197,61 +214,100 @@ let rec eval env = function
  *  List [Symbol "apply"; Symbol "+"; List [Symbol "list"; Int 1L; Int 2L]]
  *  is interpreted as
  *  List [Symbol "+"; Int 1L; Int 2L] *)
-let apply_fun = raise Not_implemented
+let apply_fun = function
+  | [ Type.Fun f; Type.List l ] -> f l
+  | _ -> raise (Runtime_error "Invalid argument(s): expected 2 expressions, a function and a list")
 
 (* TODO (#2) Implement append:
  *   NOTE (lis.py's append function is Python's + operator
  *        which works for lists, strings, and numbers) *)
-let append_fun = raise Not_implemented
+let append_fun = function
+  | [ Type.List a; Type.List b ] -> Type.List (a @ b)
+  | [ Type.String a; Type.String b ] -> Type.String (a ^ b)
+  | [ Type.Int a; Type.Int b ] -> Type.Int (Int64.add a b)
+  | [ Type.Float a; Type.Float b ] -> Type.Float (Float.add a b)
+  | _ -> raise (Runtime_error "Invalid argument(s): expected 2 same-type expressions")
 
 (* TODO (#2) Implement car:
- *   NOTE raise an error if calling car on an empty list *)
-let car_fun = raise Not_implemented
+*   NOTE raise an error if calling car on an empty list *)
+let car_fun = function
+  | [ Type.List lst ] -> List.hd lst
+  | _ -> raise (Runtime_error "Invalid argument(s): expected 1 non-empty list expression")
 
 (* TODO (#2) Implement cdr:
  *   NOTE return an empty list if calling cdr on an empty list *)
-let cdr_fun = raise Not_implemented
+let cdr_fun = function
+  | [ Type.List lst ] -> Type.List (List.tl lst)
+  | _ -> raise (Runtime_error "Invalid argument(s): expected 1 non-empty list expression")
 
 (* TODO (#2) Implement cons: *)
-let cons_fun = raise Not_implemented
+let cons_fun = function
+  | [ a; Type.List b ] -> Type.List (a :: b)
+  | _ -> raise (Runtime_error "Invalid argument(s): expected 2 expressions")
 
 (* TODO (#2) Implement expt: *)
-let expt_fun = raise Not_implemented
+let expt_fun = function
+  | [Type.Int x; Type.Int y] -> Type.Int (Int64.of_float((Int64.to_float x) ** (Int64.to_float y)))
+  | [Type.Int x; Type.Float y] -> Type.Float ((Int64.to_float x) ** y)
+  | [Type.Float x; Type.Int y] -> Type.Float (x ** (Int64.to_float y))
+  | [Type.Float x; Type.Float y] -> Type.Float (x ** y)
+  | _ -> raise (Runtime_error "Invalid argument(s): expected 2 arguments")
 
 (* TODO (#2) Implement length: *)
-let length_fun = raise Not_implemented
+let length_fun = function
+  | [ Type.List lst ] -> Type.Int (Int64.of_int (List.length lst))
+  | _ -> raise (Runtime_error "Invalid argument(s): expected 1 list expression")
 
 (* TODO (#2) Implement list?: *)
-let is_list_fun = raise Not_implemented
+let is_list_fun = function
+  | [ Type.List _ ] -> Type.Bool true
+  | _ -> Type.Bool false
 
 (* TODO (#2) Implement map: *)
-let map_fun = raise Not_implemented
+let map_fun = function
+  | [ Type.Fun f; Type.List lst ] -> Type.List (List.map (fun x -> f[x]) lst)
+  | _ -> raise (Runtime_error "Invalid argument(s): expected 2 expressions")
 
 (* TODO (#2) Implement max: *)
-let max_fun = raise Not_implemented
+let max_fun = function
+  | [ a; b ] -> max a b
+  | _ -> raise (Runtime_error "Invalid argument(s): expected 2 expressions")
 
 (* TODO (#2) Implement min: *)
-let min_fun = raise Not_implemented
+let min_fun = function
+  | [ a; b ] -> min a b
+  | _ -> raise (Runtime_error "Invalid argument(s): expected 2 expressions")
 
 let not_fun = function
   | [ Type.Bool b ] -> Type.Bool (not b)
   | _ -> raise (Runtime_error "Invalid argument(s): expected boolean")
 
 (* TODO (#2) Implement null?: *)
-let is_null_fun = raise Not_implemented
+(* Assume this is checking if a list is null *)
+let is_null_fun = function
+  | [ Type.List lst ] -> (
+    match List.length lst with
+    | 0 -> Type.Bool true
+    | _ -> Type.Bool false)
+  | _ -> raise (Runtime_error "Invalid argument(s): expected 1 list expression")
 
 (* TODO (#2) Implement number?: *)
-let is_number_fun = raise Not_implemented
+let is_number_fun = function
+  | [ Type.Int _ ] -> Type.Bool true
+  | [ Type.Float _ ] -> Type.Bool true
+  | _ -> Type.Bool false
 
 (* TODO (#2) Implement procedure?  (hint: Type.Fun is the only type of procedure in MLisp): *)
-let is_procedure_fun = raise Not_implemented
+let is_procedure_fun = function
+  | [ Type.Fun _ ] -> Type.Bool true
+  | _ -> Type.Bool false
 
 let is_symbol_fun = function
   | [ Type.Symbol _ ] -> Type.Bool true
   | _ -> Type.Bool false
 
 (* TODO (#3a) Refactor add_fun, sub_fun, and div_fun into a single
- *            higher-order function *)
+*            higher-order function *)
 let add_fun = function
   | [ Type.Int a; Type.Int b ] -> Type.Int (Int64.add a b)
   | _ -> raise (Runtime_error "Invalid argument(s): expected 2 numbers")
@@ -314,7 +370,10 @@ let print_fun = function
   | _ -> raise (Runtime_error "Invalid argument(s): expected 1 expression")
 
 (* TODO (#5) Implment round: *)
-let round_fun = raise Not_implemented
+let round_fun = function
+  | [ Type.Int i ] -> Type.Int i
+  | [ Type.Float f ] -> Type.Int (Int64.of_int (truncate (f +. 0.5)))
+  | _ -> raise (Runtime_error "Invalid argument(s): expected 1 expression")
 
 (* global environment *)
 let global_env =
